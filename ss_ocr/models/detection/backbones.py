@@ -68,6 +68,8 @@ _DEFAULT_FEATURE_LAYERS = {
     'resnet152': ('conv5_block3_out', 'conv4_block36_out', 
                   'conv3_block8_out', 'conv2_block3_out', 'conv1_relu'),
 
+    # TODO: Resnets v2
+
     # DenseNet
     'densenet121': ('relu', 'pool4_conv', 
                     'pool3_conv', 'pool2_conv',
@@ -82,7 +84,7 @@ _DEFAULT_FEATURE_LAYERS = {
     # Mobile Nets
     'mobilenet': ('conv_pw_13_relu', 'conv_pw_11_relu', 'conv_pw_5_relu', 
                   'conv_pw_3_relu', 'conv_pw_1_relu'),
-    'mobilenetv2': ('out_relu ', 'block_13_expand_relu', 
+    'mobilenetv2': ('out_relu', 'block_13_expand_relu', 
                     'block_6_expand_relu', 'block_3_expand_relu', 
                     'block_1_expand_relu'),
 
@@ -137,6 +139,7 @@ def list_supported_models() -> Sequence[str]:
 def build_fpn_backbone(name: str, 
                        input_shape: Tuple[int, int, int],
                        n_levels: int = 4) -> tf.keras.Model:
+
     if name not in _MODELS:
         supported_models = list_supported_models()
         supported_models = '\n'.join(f'- {o}' for o in supported_models)

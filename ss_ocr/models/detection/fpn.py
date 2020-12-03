@@ -23,10 +23,10 @@ class FPNDetector(tf.keras.Model):
         {_SUPPORTED_MODELS}
     image_shape: Tuple[int, int, int]
         Shape tuple to specify the input image size, including the channels
-    output_filters: int
+    n_classes: int
         Channels of last convolution. If using the FPN for detection this is 
         the number of classes
-    output_activation: str
+    activation: str
         Activation of the last convolution.
     inner_channels: int, default 256
         Filters to use inside the pyramid
@@ -34,8 +34,8 @@ class FPNDetector(tf.keras.Model):
     def __init__(self, 
                  backbone: str,
                  image_shape: Tuple[int, int, int], 
-                 output_filters: int,
-                 output_activation: Optional[str] = None,
+                 n_classes: int,
+                 activation: Optional[str] = None,
                  inner_channels: int = 256,
                  reduce_output: str = 'concat') -> None:
 
@@ -44,8 +44,8 @@ class FPNDetector(tf.keras.Model):
         self.image_shape = image_shape
         self.inner_channels = inner_channels
         self.reduce_output = reduce_output
-        self.output_filters = output_filters
-        self.output_activation = output_activation
+        self.n_classes = n_classes
+        self.activation = activation
 
         if self.reduce_output == 'concat':
             self.reduces_out_layer = tf.keras.layers.Concatenate(axis=-1)
@@ -83,11 +83,11 @@ class FPNDetector(tf.keras.Model):
             name='pool_merged_features')
 
         self.output_conv = tf.keras.layers.Conv2D(
-            self.output_filters,
+            self.n_classes,
             kernel_size=3,
             padding='same',
             name='detection',
-            activation=self.output_activation)
+            activation=self.activation)
 
     def call(self, 
              x: tf.Tensor, 
