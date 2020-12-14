@@ -9,6 +9,7 @@ from . import backbones
 _SUPPORTED_MODELS = '\n'.join(f'- {o}' 
                               for o in backbones.list_supported_models())
 
+
 class FPNDetector(tf.keras.Model):
 
     f"""
@@ -21,9 +22,7 @@ class FPNDetector(tf.keras.Model):
     backbone: str
         Neural Network architecture to use as a backbone. As now we support:
         {_SUPPORTED_MODELS}
-    image_shape: Tuple[int, int, int]
-        Shape tuple to specify the input image size, including the channels
-    n_classes: int
+   n_classes: int
         Channels of last convolution. If using the FPN for detection this is 
         the number of classes
     activation: str
@@ -33,7 +32,6 @@ class FPNDetector(tf.keras.Model):
     """
     def __init__(self, 
                  backbone: str,
-                 image_shape: Tuple[int, int, int], 
                  n_classes: int,
                  activation: Optional[str] = None,
                  inner_channels: int = 256,
@@ -47,6 +45,8 @@ class FPNDetector(tf.keras.Model):
         self.n_classes = n_classes
         self.activation = activation
 
+        # Layer to merge all the feature maps resulting from the
+        # differents FPN levels
         if self.reduce_output == 'concat':
             self.reduces_out_layer = tf.keras.layers.Concatenate(axis=-1)
         elif self.reduce_output == 'mean':
@@ -57,37 +57,49 @@ class FPNDetector(tf.keras.Model):
             raise ValueError('Reduce output must be either "concat", "mean", '
                              f'"sum" or None. {reduce_output} is not supported')
 
-        n_levels = 4 # Using 5 levels increases a lot the memory usage
-        self.backbone = backbones.build_fpn_backbone(
-            self.backbone_name, 
-            input_shape=image_shape,
-            n_levels=n_levels)
+        self.n_levels = 4 # Using 5 levels increases a lot the memory usage
 
-        levels = list(range(2, n_levels + 2))
+        levels = list(range(2, self.n_levels + 2))
+
+        # We feed each backbone feature map through a pixel-wise
+        # so we reduce the number of channels to `inner_channels`
         self.pixel_wise_convs = [tf.keras.layers.Conv2D(inner_channels, 
                                                         kernel_size=1, 
                                                         name=f'pixel_wise_C{i}')
                                  for i in levels]
 
+        # To reduce the antialiasing after merging feature maps
         self.antialias_convs = [tf.keras.layers.Conv2D(
                                     inner_channels,
                                     kernel_size=3,
                                     padding='same',
                                     name=f'antialiasing_P{i}') 
                                 for i in levels[1:][::-1]]
-
+        
+        # After merging all the feature maps we apply a pixel-wise
+        # to combine all the learned features at each FPN scale
         self.pool_reduced_conv = tf.keras.layers.Conv2D(
             inner_channels,
             kernel_size=1,
             padding='same',
             name='pool_merged_features')
 
+        # Classification layer
         self.output_conv = tf.keras.layers.Conv2D(
             self.n_classes,
             kernel_size=3,
             padding='same',
             name='detection',
             activation=self.activation)
+
+    def build(self, input_shape: tf.TensorShape) -> None:
+        self.backbone = backbones.build_fpn_backbone(
+            self.backbone_name,
+            input_shape=input_shape[1:],
+            n_levels=self.n_levels)
+
+        super(UNet, self).build(input_shape)
+
 
     def call(self, 
              x: tf.Tensor, 
@@ -114,7 +126,7 @@ class FPNDetector(tf.keras.Model):
         P2 = self.antialias_convs[2](P2, training=training)
 
         largest_size = P2.shape[1:-1]
-        
+
         x = self.reduces_out_layer([
             tf.image.resize(o, largest_size, method='nearest') 
             for o in (P2, P3, P4, P5)])
