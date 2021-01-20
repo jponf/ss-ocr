@@ -5,7 +5,7 @@ other models. These backbones may come with already pre-trained weights, which
 can save a significant amount of training time.
 """
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import tensorflow as tf
 
@@ -170,7 +170,8 @@ def list_supported_models() -> Sequence[str]:
 
 def build_fpn_backbone(name: str,
                        input_tensor: tf.Tensor,
-                       n_levels: int = 4) -> tf.keras.Model:
+                       n_levels: int = 4,
+                       weights: Optional[str] = None) -> tf.keras.Model:
     """Builds a Feature Pyramid Network (FPN) backbone. This type of
     models was described on:
     "Feature Pyramid Networks for Object Detection"
@@ -203,7 +204,7 @@ def build_fpn_backbone(name: str,
     model_cls, _ = _MODELS[name]
     model = model_cls(input_tensor=input_tensor,
                       include_top=False,
-                      weights='imagenet')
+                      weights=weights)
 
     outputs = [model.get_layer(o).output
                for o in _DEFAULT_FEATURE_LAYERS[name][:n_levels]]

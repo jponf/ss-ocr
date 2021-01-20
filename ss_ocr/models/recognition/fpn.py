@@ -2,11 +2,12 @@
 
 # pylint: disable=missing-module-docstring
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import tensorflow as tf
 
-from . import backbones
+from ss_ocr.models import backbones
+from ss_ocr.models.recognition import utils
 
 ################################################################################
 
@@ -20,8 +21,10 @@ def build_fpn_recognizer(
         output_channels: int = 512,
         reduce_method: str = "concat",
         upsample_method: str = "nearest",
-        pre_lstm_units: Optional[int] = None,
-        post_lstm_units: Optional[int] = None,
+        lstm_enc_units: Optional[Sequence[int]] = None,
+        lstm_enc_merge: str = "concat",
+        lstm_enc_input_feats: Optional[int] = None,
+        lstm_dec_units: Optional[int] = None,
         lstm_steps_to_discard: int = 2,
         dropout_rate: int = 0.25,
         freeze_backbone: bool = False) -> tf.keras.Model:
@@ -52,9 +55,16 @@ def build_fpn_recognizer(
     upsample_method : str
         Interpolation method used when upsampling feature maps. Possible
         options are: bilinear, bicubic and nearest
-    pre_lstm_units : int
-        Number of units in the LSTM encoder layer.
-    post_lstm_units : int
+    lstm_enc_units : Sequence[int]
+        Number of units in each LSTM encoder layer.
+    lstm_enc_merge: str
+        How the bidirectional encoder should merge the features of each
+        timestep flowing in opposite  directions.
+    lstm_enc_input_feats: Optional[int]
+        Number of features in each time step for the encoder. The idea is
+        reduce the features outputed by the FPN network to use less parameters,
+        if not specified this reduction will not be applied.
+    lstm_dec_units : int
         Number of units in the LSTM decoder layer.
     lstm_steps_to_discard : int
         Number of LSTM steps that must be discarded. Usually because the first
@@ -82,8 +92,10 @@ def build_fpn_recognizer(
 
     # Infer some values if necesseary
     output_len = output_len or input_shape[0]
-    pre_lstm_units = pre_lstm_units or len(alphabet) * 2
-    post_lstm_units = post_lstm_units or len(alphabet) * 5
+    lstm_enc_units = lstm_enc_units or [len(alphabet) * 2] * 3
+    lstm_dec_units = lstm_dec_units or len(alphabet) * 4
+    lstm_enc_input_feats = lstm_enc_input_feats or max(max(lstm_enc_units),
+                                                       lstm_dec_units)
 
     input_tensor = tf.keras.Input(input_shape)
 
@@ -113,18 +125,35 @@ def build_fpn_recognizer(
         target_shape=(features_w, features_h * features_c),
         name="reshape_2d_to_seq")(features)
 
+    # Stacked LSTM Encoder [BEGIN]
+    features = tf.keras.layers.Dense(lstm_enc_input_feats,
+                                    activation="relu",
+                                    name="pre_lstm_enc")(features)
+    features = tf.keras.layers.SpatialDropout1D(
+        dropout_rate, name="lstm_enc_dropout")(features)
+
+    for i, units in enumerate(lstm_enc_units):
+        features = tf.keras.layers.Bidirectional(
+            tf.keras.layers.LSTM(units,
+                                 return_sequences=True,
+                                 kernel_initializer="he_normal",
+                                 name=f"lstm_enc_{i+1}"),
+            merge_mode=lstm_enc_merge,
+            name=f"bilstm_enc_{i+1}")(features)
+    # Stacked LSTM Encoder [END]
+
     # Attention [BEGIN]
     att_repeat_state = tf.keras.layers.RepeatVector(features_w,
                                                     name="repeat_h_state")
     att_concatenate = tf.keras.layers.Concatenate(axis=-1,
                                                   name="att_concat")
-    att_dense1 = tf.keras.layers.Dense(units=output_channels,
+    att_dense1 = tf.keras.layers.Dense(units=features.shape[-1],
                                        activation="tanh",
-                                       name="att_intermediate_energies")
+                                       name="att_energies1")
     att_dense2 = tf.keras.layers.Dense(units=1,
-                                       activation="relu",
-                                       name="att_energies")
-    att_weights = tf.keras.layers.Softmax(name="att_weights")
+                                       activation=tf.keras.layers.LeakyReLU(.3),
+                                       name="att_energies2")
+    att_weights = tf.keras.layers.Softmax(name="att_weights", axis=1)
     att_context = tf.keras.layers.Dot(axes=1, name="att_context")
 
     def _compute_attention(encoded: tf.Tensor,
@@ -138,42 +167,34 @@ def build_fpn_recognizer(
     # Attention [END]
 
     # Sequence Model [BEGIN]
-    features = tf.keras.layers.Dropout(dropout_rate,
-                                       name="fpn_dropout")(features)
-    encoded_features = tf.keras.layers.Bidirectional(
-        tf.keras.layers.LSTM(pre_lstm_units,
-                             return_sequences=True,
-                             name="lstm_encodre"),
-        name="bilstm_encoder")(features)
-
     context_dropout = tf.keras.layers.Dropout(dropout_rate,
                                               name="context_dropout")
-    post_lstm = tf.keras.layers.LSTM(post_lstm_units,
-                                     return_state=True,
-                                     name="lstm_decoder")
+    lstm_dec = tf.keras.layers.LSTM(lstm_dec_units,
+                                    return_state=True,
+                                    kernel_initializer="he_normal",
+                                    name="lstm_decoder")
     alphabet_dense = tf.keras.layers.Dense(
-        len(alphabet) + 1, kernel_initializer="he_normal",
+        len(alphabet), kernel_initializer="he_normal",
         name="alphabet")
-    alphabet_softmax = tf.keras.layers.Softmax(name="alphabet_softmax")
 
     # Generate LSTM initial state (zero vector)
     batch_size = tf.keras.layers.Lambda(lambda x: tf.shape(x)[0],
                                         name="batch_size")(input_tensor)
-    h_state = tf.keras.layers.Lambda(lambda x: tf.zeros([x, post_lstm_units]),
+    h_state = tf.keras.layers.Lambda(lambda x: tf.zeros([x, lstm_dec_units]),
                                      name="h_state0")(batch_size)
-    c_state = tf.keras.layers.Lambda(lambda x: tf.zeros([x, post_lstm_units]),
+    c_state = tf.keras.layers.Lambda(lambda x: tf.zeros([x, lstm_dec_units]),
                                      name="c_state0")(batch_size)
 
     outputs = []
     for i in range(output_len + lstm_steps_to_discard):
-        context = _compute_attention(encoded_features, h_state)
+        context = _compute_attention(features, h_state)
         context = context_dropout(context)
 
-        h_state, _, c_state = post_lstm(context,
+        h_state, _, c_state = lstm_dec(context,
                                         initial_state=[h_state, c_state])
         if i >= lstm_steps_to_discard:
             out = alphabet_dense(h_state)
-            outputs.append(alphabet_softmax(out))
+            outputs.append(out)
     # Sequence Model [END]
 
     output = tf.keras.layers.Lambda(lambda x: tf.stack(x, axis=1, name="stack"),
@@ -184,7 +205,9 @@ def build_fpn_recognizer(
 
 def compile_fpn_recognizer_with_ctc_loss(
         fpn_recognizer: tf.keras.Model,
-        optimizer: Optional[tf.optimizers.Optimizer] = None) -> tf.keras.Model:
+        optimizer: Optional[tf.optimizers.Optimizer] = None,
+        clip_norm: Optional[float] = None,
+        blank_index: int = 0) -> tf.keras.Model:
     """Creates and compiles a model to train the given `fpn_recognizer` model.
 
     Parameters
@@ -201,23 +224,30 @@ def compile_fpn_recognizer_with_ctc_loss(
                                   name="logit_length")
 
     loss = tf.keras.layers.Lambda(
-        lambda inputs: tf.nn.ctc_loss(labels=inputs[0],
-                                      logits=inputs[1],
-                                      label_length=inputs[2],
-                                      logit_length=inputs[3],
-                                      logits_time_major=False),
+        lambda inputs: tf.nn.ctc_loss(
+            labels=inputs[0],
+            logits=inputs[1],
+            label_length=inputs[2],
+            logit_length=inputs[3],
+            logits_time_major=False,
+            blank_index=blank_index),
         name="ctc_loss"
     )([labels, fpn_recognizer.output, label_length, logit_length])
 
-    model = tf.keras.Model(inputs=[fpn_recognizer.input, labels,
-                                   label_length, logit_length],
-                           outputs=loss)
+    model = utils.TrainingModel(
+        inputs=[fpn_recognizer.input, labels,
+                label_length, logit_length],
+        outputs=loss,
+        clip_norm=clip_norm)
+
     model.compile(
         loss=lambda _, y_pred: y_pred,
         optimizer=optimizer)
 
     return model
 
+
+################################################################################
 
 def _build_and_reduce_fpn(backbone: tf.keras.Model,
                           inner_channels: int,
