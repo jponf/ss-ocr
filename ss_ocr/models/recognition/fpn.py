@@ -6,8 +6,7 @@ from typing import Optional, Sequence, Tuple, Union
 
 import tensorflow as tf
 
-from ss_ocr.models import backbones
-from ss_ocr.models.recognition import utils
+from ss_ocr.models import backbones, utils
 
 ################################################################################
 
