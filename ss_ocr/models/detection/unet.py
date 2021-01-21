@@ -161,4 +161,3 @@ if __name__ == "__main__":
     im = tf.random.uniform([1, 512, 512, 3])
     out = model(im)
     print(out.shape)
-
