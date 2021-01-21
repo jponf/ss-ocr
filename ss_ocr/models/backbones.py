@@ -209,4 +209,6 @@ def build_fpn_backbone(name: str,
     outputs = [model.get_layer(o).output
                for o in _DEFAULT_FEATURE_LAYERS[name][:n_levels]]
 
-    return tf.keras.Model(inputs=model.inputs, outputs=outputs[::-1])
+    return tf.keras.Model(inputs=model.inputs, 
+                          outputs=outputs[::-1], 
+                          name=name)

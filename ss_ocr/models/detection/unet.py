@@ -1,10 +1,10 @@
 # -*- coding: utf-8
 
-from typing import Optional, Tuple, Sequence
+from typing import Optional, Tuple, Sequence, Union
 
 import tensorflow as tf
 
-from . import backbones
+from ss_ocr.models import backbones
 
 _SUPPORTED_MODELS = '\n'.join(f'- {o}' 
                               for o in backbones.list_supported_models())
@@ -26,13 +26,14 @@ class _Conv3x3BnReLU(tf.keras.layers.Layer):
         self.conv = [tf.keras.layers.Conv2D(filters, 
                                             kernel_size=3, 
                                             padding='same',
-                                            name=f'conv_3_3_{i + 1}')
+                                            name=f'{name}_{i + 1}')
                      for i in range(self.n_layers)]
 
-        self.relu = tf.keras.layers.ReLU()
+        self.relu = tf.keras.layers.ReLU(name=f'{name}_relu')
 
         if self.use_batchnorm:
-            self.bn = [tf.keras.layers.BatchNormalization(name=f'bn_{i + 1}') 
+            self.bn = [tf.keras.layers.BatchNormalization(
+                            name=f'{name}_bn_{i + 1}') 
                        for i in range(self.n_layers)]
 
         super(_Conv3x3BnReLU, self).__init__(name=name, **kwargs)
@@ -57,9 +58,11 @@ class _DecoderBlock(tf.keras.layers.Layer):
     def __init__(self, 
                  filters: int, 
                  use_batchnorm: bool = True, 
-                 upsample_strategy: str = 'upsample') -> None:
+                 upsample_strategy: str = 'upsample',
+                 name: Optional[str] = None, 
+                 **kwargs) -> None:
 
-        super(_DecoderBlock, self).__init__()
+        super(_DecoderBlock, self).__init__(name=name, **kwargs)
 
         self.filters = filters
         self.use_batchnorm = use_batchnorm
@@ -68,23 +71,33 @@ class _DecoderBlock(tf.keras.layers.Layer):
         if self.upsample_strategy == 'conv':
             self.upsample = tf.keras.layers.Conv2DTranspose(
                 filters, kernel_size=(4, 4), strides=(2, 2), padding='same',
-                name='upsample_conv')
+                name=f'{name}_upsample_conv')
 
-            if self.use_batchnorm:
-                self.bn = tf.keras.layers.BatchNormalization()
-                self.relu = tf.keras.layers.ReLU()
-
-            self.conv = _Conv3x3BnReLU(filters, self.use_batchnorm)
+            self.conv = _Conv3x3BnReLU(filters, 
+                                       self.use_batchnorm,
+                                       name=f'{name}_conv')
 
         elif self.upsample_strategy == 'upsample':
-            self.upsample = tf.keras.layers.UpSampling2D(name='upsample')
-            self.conv = _Conv3x3BnReLU(filters, self.use_batchnorm, n_layers=2)
+            self.upsample = tf.keras.layers.UpSampling2D(
+                name=f'{name}_upsample')
+
+            self.conv = _Conv3x3BnReLU(filters, 
+                                       self.use_batchnorm, 
+                                       n_layers=2,
+                                       name=f'{name}_conv')
             # Set to False to avoid using bn layer on `call` method
             self.use_batchnorm = False
 
         else:
             raise ValueError('`upsample strategy` must be either "upsample" '
                              'or "conv"')
+
+        if self.use_batchnorm:
+            self.bn = tf.keras.layers.BatchNormalization(name=f'{name}_bn')
+        else:
+            self.bn = tf.keras.layers.Layer() # Identity layer
+
+        self.relu = tf.keras.layers.ReLU(name=f'{name}_relu')
 
     def call(self, 
              x: Tuple[tf.Tensor, tf.Tensor], 
@@ -93,9 +106,8 @@ class _DecoderBlock(tf.keras.layers.Layer):
         x, residual = x
 
         x = self.upsample(x)
-        if self.use_batchnorm:
-            x = self.bn(x)
-            x = self.relu(x)
+        x = self.bn(x)
+        x = self.relu(x)
 
         if residual is not None:
             x = tf.concat([x, residual], axis=-1)
@@ -103,7 +115,15 @@ class _DecoderBlock(tf.keras.layers.Layer):
         return self.conv(x)
 
 
-class UNet(tf.keras.Model):
+def build_unet_detector(
+        input_shape: Union[Tuple[int, int, int], tf.TensorShape],
+        backbone: str,
+        n_classes: int,
+        activation: str = 'sigmoid',
+        decoder_filters: Sequence[int] = (256, 128, 64, 32, 16),
+        use_batchnorm: bool = True, 
+        upsample_strategy: str = 'upsample',
+        freeze_backbone: bool = False) -> tf.keras.Model:
     f"""
     Builds a modified version of the UNet described on 
     "U-Net: Convolutional Networks for Biomedical Image Segmentation"
@@ -111,6 +131,9 @@ class UNet(tf.keras.Model):
 
     Parameters
     ----------
+    input_shape : tuple or tf.TensorShape
+        Shape of the input tensor without the batch dimension.
+        Image format should be: Height, Width, # Channels
     backbone: str
         Neural Network architecture to use as a backbone. As now we support:
         {_SUPPORTED_MODELS}
@@ -128,67 +151,58 @@ class UNet(tf.keras.Model):
         Method to upsample feature maps in the decoder. It can either be:
          - "upsample": Uses nearest interpolation to upsample feature maps.
          - "conv": Uses Transposed convs to upsample the feature maps.
+    freeze_backbone : bool
+        Whether or not backbone layers should be trainable or not (frozen).
+
     """
-    def __init__(self, 
-                 backbone: str,
-                 n_classes: int,
-                 activation: str = 'sigmoid',
-                 decoder_filters: Sequence[int] = (256, 128, 64, 32, 16),
-                 use_batchnorm: bool = True, 
-                 upsample_strategy: str = 'upsample') -> None:
-
-        super(UNet, self).__init__()
-
-        if len(decoder_filters) != 5:
+    if len(decoder_filters) != 5:
             raise ValueError("Decoder has 5 layers."
                              f"You specified {len(decoder_filters)} filters")
 
-        self.backbone_name = backbone
-        self.n_classes = n_classes
-        self.activation = activation
-        self.decoder_filters = decoder_filters
-        self.use_batchnorm = use_batchnorm
-        self.upsample_strategy = upsample_strategy
+    input_tensor = tf.keras.Input(input_shape)
 
-        self.n_levels = 5
+    backbone = backbones.build_fpn_backbone(
+        name=backbone,
+        input_tensor=input_tensor,
+        n_levels=5)
 
-        self.decoders = [_DecoderBlock(filters=f, 
-                                       use_batchnorm=self.use_batchnorm,
-                                       upsample_strategy=self.upsample_strategy)
-                         for f in decoder_filters]
+    if freeze_backbone:
+        for layer in backbone.layers:
+            layer.trainable = False
 
-        self.output_conv = tf.keras.layers.Conv2D(self.n_classes,
-                                                  kernel_size=3,
-                                                  activation=self.activation,
-                                                  padding='same')
+    decoders = [_DecoderBlock(filters=f, 
+                              use_batchnorm=use_batchnorm,
+                              upsample_strategy=upsample_strategy,
+                              name=f'decoder_{i}')
+                for i, f in enumerate(decoder_filters, start=1)]
 
-    def build(self, input_shape: tf.TensorShape) -> None:
-        self.backbone = backbones.build_fpn_backbone(
-            self.backbone_name,
-            input_shape=input_shape[1:],
-            n_levels=self.n_levels)
+    out = _unet_forward(input_tensor, 
+                        backbone=backbone, 
+                        decoders=decoders, 
+                        n_classes=n_classes, 
+                        activation=activation)
 
-        super(UNet, self).build(input_shape)
-
-    def call(self, x: tf.Tensor) -> tf.Tensor:
-
-        residuals = self.backbone(x)[::-1]
-
-        x = residuals[0]
-        for i in range(self.n_levels):
-            if i < len(residuals) - 1:
-                residual = residuals[i + 1]
-            else:
-                residual = None
-            x = self.decoders[i]([x, residual])
-
-        return self.output_conv(x)
+    return tf.keras.Model(input_tensor, out)
 
 
-if __name__ == "__main__":
-    model = UNet('mobilenetv2', 3, upsample_strategy='conv')
-    model.build([None, 512, 512, 3])
+def _unet_forward(x: tf.Tensor,
+                  backbone: tf.keras.Model, 
+                  decoders: Sequence[tf.keras.Model],
+                  n_classes: int,
+                  activation: str):
 
-    im = tf.random.uniform([1, 512, 512, 3])
-    out = model(im)
-    print(out.shape)
+    residuals = backbone.output[::-1]
+
+    x = residuals[0]
+    for i in range(5):
+        if i < len(residuals) - 1:
+            residual = residuals[i + 1]
+        else:
+            residual = None
+        x = decoders[i]([x, residual])
+
+    return tf.keras.layers.Conv2D(n_classes,
+                                  kernel_size=3,
+                                  activation=activation,
+                                  padding='same',
+                                  name='unet_output')(x)
