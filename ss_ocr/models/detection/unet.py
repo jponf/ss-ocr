@@ -6,6 +6,9 @@ import tensorflow as tf
 
 from . import backbones
 
+_SUPPORTED_MODELS = '\n'.join(f'- {o}' 
+                              for o in backbones.list_supported_models())
+
 
 class _Conv3x3BnReLU(tf.keras.layers.Layer):
 
@@ -95,14 +98,37 @@ class _DecoderBlock(tf.keras.layers.Layer):
             x = self.relu(x)
 
         if residual is not None:
-            x_shape = tf.shape(x)
             x = tf.concat([x, residual], axis=-1)
 
         return self.conv(x)
 
 
 class UNet(tf.keras.Model):
+    f"""
+    Builds a modified version of the UNet described on 
+    "U-Net: Convolutional Networks for Biomedical Image Segmentation"
+    (https://arxiv.org/abs/1505.04597)
 
+    Parameters
+    ----------
+    backbone: str
+        Neural Network architecture to use as a backbone. As now we support:
+        {_SUPPORTED_MODELS}
+    n_classes: int
+        Channles of the las convolution. If using the model directly for 
+        detection this translates to the number of classes
+    activation: str
+        Activation of the last convolution
+    decoder_filters: Sequence[int], default (256, 128, 64, 32, 16)
+        Decoder is composed of five layers. This is the convolutional filters
+        used in each decoder layer.
+    use_batchnorm: bool, default True
+        Whether to use Batch Normalization after convolutions or not.
+    upsample_strategy: default 'upsample'
+        Method to upsample feature maps in the decoder. It can either be:
+         - "upsample": Uses nearest interpolation to upsample feature maps.
+         - "conv": Uses Transposed convs to upsample the feature maps.
+    """
     def __init__(self, 
                  backbone: str,
                  n_classes: int,
@@ -112,6 +138,11 @@ class UNet(tf.keras.Model):
                  upsample_strategy: str = 'upsample') -> None:
 
         super(UNet, self).__init__()
+
+        if len(decoder_filters) != 5:
+            raise ValueError("Decoder has 5 layers."
+                             f"You specified {len(decoder_filters)} filters")
+
         self.backbone_name = backbone
         self.n_classes = n_classes
         self.activation = activation
@@ -150,7 +181,7 @@ class UNet(tf.keras.Model):
             else:
                 residual = None
             x = self.decoders[i]([x, residual])
-            
+
         return self.output_conv(x)
 
 
