@@ -105,7 +105,7 @@ def run(input_path: str, output_path: str, artifacts_path: Optional[str],
             raise ValueError('Artifacts path {str(artifacts_path)} '
                              'does not exist')
 
-        artifacts = list(artifacts_path.glob('*/*.png'))
+        artifacts = list(artifacts_path.glob('*.png'))
     else:
         artifacts = []
 
