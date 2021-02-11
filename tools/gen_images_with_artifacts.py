@@ -9,6 +9,13 @@ import cv2
 import numpy as np
 
 
+################################################################################
+
+IMG_SUFFIXES = [".png", ".jpg", ".jpeg"]
+
+
+################################################################################
+
 def random_color():
     return tuple(np.random.randint(256, size=3).tolist())
 
@@ -51,6 +58,9 @@ def draw_random_line_points(img,
 
 def load_artifact(artifact_path: pathlib.Path) -> np.ndarray:
     artifact = cv2.imread(str(artifact_path))
+    if artifact is None:
+        raise ValueError("unable to load artifact {}".format(artifact_path))
+
     _, artifact = cv2.threshold(artifact, 128, 255, cv2.THRESH_BINARY)
 
     h, w = artifact.shape[:2]
@@ -64,16 +74,22 @@ def load_artifact(artifact_path: pathlib.Path) -> np.ndarray:
 
 def merge_random_artifact(im_path: pathlib.Path,
                           artifacts: Sequence[pathlib.Path]):
-
     im = cv2.imread(str(im_path))
 
-    artifact_path = random.choice(artifacts)
-    artifact = load_artifact(artifact_path)
-    artifact = cv2.resize(artifact, im.shape[:2][::-1])
+    try:
+        artifact_path = random.choice(artifacts)
+        artifact = load_artifact(artifact_path)
+        artifact = cv2.resize(artifact, im.shape[:2][::-1])
+    except ValueError as err:
+        print("Error loading artifact:", err, file=sys.stderr)
 
     merged = np.minimum(im, artifact)
-
     return merged
+
+
+def _load_artifacts(artifacts_path):
+    return [path for path in tqdm.tqdm(artifacts_path.rglob("*"))
+            if path.is_file() and path.suffix in IMG_SUFFIXES]
 
 
 @click.command()
@@ -105,18 +121,22 @@ def run(input_path: str, output_path: str, artifacts_path: Optional[str],
             raise ValueError('Artifacts path {str(artifacts_path)} '
                              'does not exist')
 
-        artifacts = list(artifacts_path.glob('*.png'))
+        print("Loading artifacts ...")
+        artifacts = _load_artifacts(artifacts_path)
+        print(f"Found {len(artifacts)} atifacts")
     else:
         artifacts = []
 
     for im_path in tqdm.tqdm(list(input_path.iterdir())):
-        if artifacts:
-            im = merge_random_artifact(im_path, artifacts)
-        im = draw_random_line_points(im,
-                                     color=random_color(),
-                                     min_thickness=min_thickness,
-                                     max_thickness=max_thickness)
-        cv2.imwrite(str(output_path / im_path.name), im)
+        out_path = output_path / im_path.name
+        if not out_path.exists() and im_path.suffix in IMG_SUFFIXES:
+            if artifacts:
+                im = merge_random_artifact(im_path, artifacts)
+            im = draw_random_line_points(im,
+                                        color=random_color(),
+                                        min_thickness=min_thickness,
+                                        max_thickness=max_thickness)
+            cv2.imwrite(str(out_path), im)
 
 
 if __name__ == '__main__':
