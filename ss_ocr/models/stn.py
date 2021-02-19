@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # pylint: disable=invalid-name
+
 import collections
 from typing import Optional, Sequence
 
@@ -8,104 +9,6 @@ import tensorflow as tf
 
 
 ################################################################################
-
-StnLocalizationConv = collections.namedtuple("StnLocalizationConv",
-                                             ["filters", "kernel", "padding",
-                                              "batch_norm", "pool"])
-
-_DEFAULT_STN_LOCALIZATION_CONV = (
-    StnLocalizationConv(filters=16, kernel=(5, 5), padding="same",
-                        batch_norm=True, pool=(2, 2)),
-    StnLocalizationConv(filters=32, kernel=(5, 5), padding="same",
-                        batch_norm=True, pool=(2, 2)),
-    StnLocalizationConv(filters=64, kernel=(3, 3), padding="same",
-                        batch_norm=True, pool=(2, 2)),
-)
-
-
-################################################################################
-
-class StnLocalizationLayer(tf.keras.layers.Layer):
-    """Spatial Transformer Network - Localization Layer
-
-    Paramters
-    ---------
-    steps : Sequence[StnLocalizationConv]
-        Localization layer convolution steps.
-    """
-
-    def __init__(self,
-                 *args,
-                 steps: Optional[Sequence[StnLocalizationConv]] = None,
-                 name: str = "stn_localization",
-                 **kwargs):
-        super().__init__(*args, name=name, **kwargs)
-        self._steps = steps or _DEFAULT_STN_LOCALIZATION_CONV
-
-        # Convolutional layers
-        self.conv_layers = []
-        self.norm_layers = []
-        self.relu_layers = []
-        self.pool_layers = []
-
-        for step in self._steps:
-            self.conv_layers.append(
-                tf.keras.layers.Conv2D(filters=step.filters,
-                                       kernel_size=step.kernel))
-            if step.batch_norm:
-                self.norm_layers.append(tf.keras.layers.BatchNormalization())
-            else:
-                self.norm_layers.append(None)
-
-            self.relu_layers.append(tf.keras.layers.ReLU())
-
-            if step.pool:
-                self.pool_layers.append(tf.keras.layers.MaxPool2D(
-                    pool_size=step.pool))
-            else:
-                self.pool_layers.append(None)
-
-        # Fully connected layers
-        self.flatten = tf.keras.layers.Flatten()
-
-        self.fc1 = tf.keras.layers.Dense(units=64)
-        self.relu = tf.keras.layers.ReLU()
-        self.fc2 = tf.keras.layers.Dense(
-            units=6,
-            kernel_initializer='zeros',
-            bias_initializer=tf.keras.initializers.constant([1.0, 0.0, 0.0,
-                                                             0.0, 1.0, 0.0]))
-        self.reshape = tf.keras.layers.Reshape((2, 3))
-
-    def get_config(self):
-        return {
-            "steps": self._steps
-        }
-
-    def compute_output_shape(self, input_shape):
-        return (None, 2, 3)
-
-    def call(self, inputs, **kwargs):
-        x = inputs
-        conv_steps = zip(self.conv_layers, self.norm_layers,
-                         self.relu_layers, self.pool_layers)
-
-        for conv, norm, relu, pool in conv_steps:
-            x = conv(x, **kwargs)
-            if norm is not None:
-                norm(x, **kwargs)
-
-            x = relu(x, **kwargs)
-            if pool is not None:
-                x = pool(x, **kwargs)
-
-        x = self.flatten(x, **kwargs)
-        x = self.fc1(x, **kwargs)
-        x = self.relu(x, **kwargs)
-
-        theta = self.fc2(x, **kwargs)
-        return self.reshape(theta, **kwargs)
-
 
 class StnGridGenerator(tf.keras.layers.Layer):
     """Spatial Transformer Network - Grid Generation Layer
@@ -170,6 +73,8 @@ class StnGridGenerator(tf.keras.layers.Layer):
 
 
 class StnBilinearSampler(tf.keras.layers.Layer):
+    """Spatial Transformer Network - Bilinear Sampler Layer
+    """
 
     def __init__(self,
                 *args,
@@ -199,7 +104,7 @@ class StnBilinearSampler(tf.keras.layers.Layer):
         images, sampling = inputs
 
         _, img_height, img_width, _ = images.shape
-        _, out_height, out_width, _ = sampling.shape
+        # _, out_height, out_width, _ = sampling.shape
         x_sampling = sampling[:, :, :, 0]
         y_sampling = sampling[:, :, :, 1]
 
@@ -244,10 +149,10 @@ class StnBilinearSampler(tf.keras.layers.Layer):
         y_sw = tf.clip_by_value(y_sw, 0, img_height - 1)
         y_se = tf.clip_by_value(y_se, 0, img_height - 1)
 
-        Inw = _indexing(images, x_nw, y_nw, out_height, out_width)
-        Ine = _indexing(images, x_ne, y_ne, out_height, out_width)
-        Isw = _indexing(images, x_sw, y_sw, out_height, out_width)
-        Ise = _indexing(images, x_se, y_se, out_height, out_width)
+        Inw = self._indexing(images, x_nw, y_nw)
+        Ine = self._indexing(images, x_ne, y_ne)
+        Isw = self._indexing(images, x_sw, y_sw)
+        Ise = self._indexing(images, x_se, y_se)
 
         # Add dimension for addition
         nw = tf.expand_dims(nw, axis=3)
@@ -259,14 +164,91 @@ class StnBilinearSampler(tf.keras.layers.Layer):
 
         return out
 
+    def _indexing(self, inputs, x, y):
+        shape = tf.shape(inputs)
+        batch_size = shape[0]
 
-def _indexing(inputs, x, y, height, width):
-    shape = tf.shape(inputs)
-    batch_size = shape[0]
+        batch_idx = tf.range(0, batch_size)
+        batch_idx = tf.reshape(batch_idx, (batch_size, 1, 1))
+        b = tf.tile(batch_idx, (1, self._height, self._width))
+        indices = tf.stack([b, y, x], 3)
 
-    batch_idx = tf.range(0, batch_size)
-    batch_idx = tf.reshape(batch_idx, (batch_size, 1, 1))
-    b = tf.tile(batch_idx, (1, height, width))
-    indices = tf.stack([b, y, x], 3)
+        return tf.gather_nd(inputs, indices)
 
-    return tf.gather_nd(inputs, indices)
+
+################################################################################
+
+StnLocalizationConv = collections.namedtuple("StnLocalizationConv",
+                                             ["filters", "kernel", "padding",
+                                              "batch_norm", "pool"])
+
+_DEFAULT_STN_LOCALIZATION_CONV = (
+    StnLocalizationConv(filters=16, kernel=(5, 5), padding="same",
+                        batch_norm=True, pool=(2, 2)),
+    StnLocalizationConv(filters=32, kernel=(5, 5), padding="same",
+                        batch_norm=True, pool=(2, 2)),
+    StnLocalizationConv(filters=64, kernel=(3, 3), padding="same",
+                        batch_norm=True, pool=(2, 2)),
+)
+
+
+def build_stn(input_tensor: tf.keras.Input,
+              name: str = "stn",
+              steps: Optional[Sequence[StnLocalizationConv]] = None,
+              out_height: Optional[int] = None,
+              out_width: Optional[int] = None):
+    """Builds a spatial transformer network.
+
+    Parameters
+    ----------
+    steps : Optional[Sequence[StnLocalizationConv]]
+        Localization layer convolution steps.
+    out_height: Optional[int]
+        Output image height, if None it will match the input image height.
+    out_width: Optional[int]
+        Output image width, if None it will match the input image width.
+    """
+    steps = steps or _DEFAULT_STN_LOCALIZATION_CONV
+
+    _, in_height, in_width, _ = input_tensor.shape
+    out_height = out_height or in_height
+    out_width = out_width or in_width
+
+    # Initialize
+    x = input_tensor
+
+    # Convolutional layers
+    for i, step in enumerate(steps, start=1):
+        x = tf.keras.layers.Conv2D(filters=step.filters,
+                                   kernel_size=step.kernel,
+                                   name=f"{name}_conv_{i}")(x)
+        if step.batch_norm:
+            x = tf.keras.layers.BatchNormalization(
+                name=f"{name}_conv_{i}_bn")(x)
+
+        x = tf.keras.layers.ReLU(name=f"{name}_conv_{i}_relu")(x)
+
+        if step.pool:
+            x = tf.keras.layers.MaxPool2D(pool_size=step.pool,
+                                          name=f"{name}_conv_{i}_pool")(x)
+
+    # Dense layers
+    x = tf.keras.layers.Flatten(name=f"{name}_flatten")(x)
+
+    x = tf.keras.layers.Dense(units=64, name=f"{name}_fc_1")(x)
+    x = tf.keras.layers.ReLU(name=f"{name}_fc_1_relu")(x)
+    x = tf.keras.layers.Dense(
+        units=6,
+        kernel_initializer="zeros",
+        bias_initializer=tf.keras.initializers.constant([1.0, 0.0, 0.0,
+                                                         0.0, 1.0, 0.0]),
+        name=f"{name}_theta")(x)
+
+    x = tf.keras.layers.Reshape((2, 3), name=f"{name}_theta_reshape")(x)
+
+    x = StnGridGenerator(height=out_height, width=out_width,
+                         name=f"{name}_grid")(x)
+    output_tensor = StnBilinearSampler(
+        name=f"{name}_sampler")([input_tensor, x])
+
+    return tf.keras.Model(inputs=input_tensor, outputs=output_tensor)
