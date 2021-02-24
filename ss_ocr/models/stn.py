@@ -113,8 +113,8 @@ class StnBilinearSampler(tf.keras.layers.Layer):
         y_sampling = 0.5 * (y_sampling + 1.0) * (img_height - 1.0)
 
         # 4 corner points for each (x, y) [north, south, west, east]
-        x_nw = tf.round(x_sampling)  # North-West
-        y_nw = tf.round(y_sampling)
+        x_nw = tf.floor(x_sampling)  # North-West
+        y_nw = tf.floor(y_sampling)
         x_ne = x_nw + 1              # North-East
         y_ne = y_nw
         x_sw = x_nw                  # South-West
@@ -134,16 +134,16 @@ class StnBilinearSampler(tf.keras.layers.Layer):
         x_sw = tf.cast(x_sw, tf.int32)
         x_se = tf.cast(x_se, tf.int32)
 
-        y_nw = tf.cast(y_nw, tf.int32)
-        y_ne = tf.cast(y_ne, tf.int32)
-        y_sw = tf.cast(y_sw, tf.int32)
-        y_se = tf.cast(y_se, tf.int32)
-
         x_nw = tf.clip_by_value(x_nw, 0, img_width - 1)
         x_ne = tf.clip_by_value(x_ne, 0, img_width - 1)
         x_sw = tf.clip_by_value(x_sw, 0, img_width - 1)
         x_se = tf.clip_by_value(x_se, 0, img_width - 1)
 
+        y_nw = tf.cast(y_nw, tf.int32)
+        y_ne = tf.cast(y_ne, tf.int32)
+        y_sw = tf.cast(y_sw, tf.int32)
+        y_se = tf.cast(y_se, tf.int32)
+        
         y_nw = tf.clip_by_value(y_nw, 0, img_height - 1)
         y_ne = tf.clip_by_value(y_ne, 0, img_height - 1)
         y_sw = tf.clip_by_value(y_sw, 0, img_height - 1)
