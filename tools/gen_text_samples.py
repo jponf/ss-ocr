@@ -5,6 +5,7 @@ import pathlib
 import random
 import sys
 import tempfile
+from typing import Sequence, TextIO, Union
 
 import click
 import fontTools.ttLib
@@ -13,49 +14,59 @@ import tqdm
 from trdg.generators import GeneratorFromStrings
 
 
-###############################################################################
+################################################################################
+
+DISTORSION_ORIENTATION = 2
+
+################################################################################
 
 @click.command()
-@click.option("-d", "--dictionary-file", required=True,
+@click.option("--dict-file", required=True,
               type=click.Path(exists=True, file_okay=True))
-@click.option("-f", "--fonts-dir", required=True,
+@click.option("--fonts-dir", required=True,
               type=click.Path(exists=True, dir_okay=True))
-@click.option("-o", "--output-dir", default="text_samples", type=click.Path())
-@click.option("-s", "--seed", type=int, default=0)
-def main(dictionary_file, fonts_dir, output_dir, seed):
-    fonts_dir = pathlib.Path(fonts_dir)
+@click.option("--output-dir", default="text_samples", type=click.Path())
+@click.option("-b", "--background", "backgrounds",
+              multiple=True, type=int, default=(1,),
+              help="What kind of background to use. 0: Gaussian Noise,"
+                   " 1: Plain white, 2: Quasicrystal, 3: Image. This option"
+                   " can be specified multiple times")
+@click.option("-d", "--distortion", "distortions",
+              multiple=True, type=int, default=(0,),
+              help="Distortion applied to the resulting image. 0: None,"
+                   " 1: Sine wave, 2: Cosine wave, 3: Random. This option"
+                   " can be specified multiple times")
+@click.option("-k", "--skew-angle", type=int, default=0,
+              help="Skewing angle of the generated text. In positive degrees.")
+@click.option("-s", "--size", "sizes",
+              required=True, multiple=True, type=int,
+              help="Define the height of the produced images if horizontal,"
+                   " else the width")
+@click.option("--samples", default=500, type=int,
+              help="Number of samples for each configuration")
+@click.option("--seed", type=int, default=0)
+def main(dict_file, fonts_dir, output_dir,
+         backgrounds: Sequence[int],
+         distortions: Sequence[int],
+         skew_angle: int,
+         sizes: Sequence[int],
+         samples: int,
+         seed):
     output_dir = pathlib.Path(output_dir)
 
-    print("Looking for fonts ...")
-    all_fonts = [str(x) for x in fonts_dir.rglob("*.ttf")]
-    print("Found", len(all_fonts), "fonts")
+    # Filter configurations
+    backgrounds = sorted(set(backgrounds))
+    distortions = sorted(set(distortions))
+    sizes = sorted(set(sizes))
 
-    print("Loding dictionary ...")
-    try:
-        words = _load_dictionary(dictionary_file)
-    except UnicodeDecodeError:
-        print("Error reading dictionary file, please make sure the file"
-              " encoding is utf-8")
-    print("Loaded", len(words), "words")
+    print("Configuration")
+    print("  - backgrounds:", ", ".join(map(str, backgrounds)))
+    print("  - distortions:", ", ".join(map(str, distortions)))
+    print("  - skewing_angle:", skew_angle)
+    print("  - sizes:", ", ".join(map(str, sizes)))
 
-    alphabet = set()
-    for word in words:
-        for char in word:
-            alphabet.add(char)
-    alphabet = sorted(alphabet)
-    print("Alphabet size:", len(alphabet))
-    print("Alphabet:", alphabet)
-
-    fonts = [x for x in tqdm.tqdm(all_fonts, desc="Filtering fonts")
-             if _font_supports_alphabet(x, alphabet)]
-    print("# Fonts that support the alphabet:", len(fonts))
-
-    # Text generator configurations  (TODO: expose this options to the user)
-    backgrounds = [0, 1, 2]
-    distorsion_types = [0, 2]
-    distorsion_orientation = 2
-    sizes = [48, 38, 32]
-    num_images_per_conf = 500
+    words, alphabet = _load_dictionary(dict_file)
+    fonts = _load_fonts(fonts_dir, alphabet)
 
     if not output_dir.exists():
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -64,53 +75,105 @@ def main(dictionary_file, fonts_dir, output_dir, seed):
     random.seed(seed)
 
     # Run generator
-    with open(output_dir / "lexicon.txt", "wt", encoding="utf-8") as lexicon_fh:
+    lexicon_path = output_dir / "lexicon.txt"
+    with open(lexicon_path, "wt", encoding="utf-8") as lexicon_fh:
         for background in backgrounds:
-            for dist_t in distorsion_types:
+            for dist_t in distortions:
                 for size in sizes:
                     random.shuffle(words)
                     generator = GeneratorFromStrings(
                         words,
-                        count=num_images_per_conf,
+                        count=samples,
                         fonts=fonts,
-                        language="es",
+                        # language="en",
                         size=size,
                         background_type=background,
                         distorsion_type=dist_t,
-                        distorsion_orientation=distorsion_orientation,
-                        text_color="#f5f5f5,#000000",
-                        skewing_angle=3,
+                        distorsion_orientation=DISTORSION_ORIENTATION,
+                        text_color="#6e6e6e,#000000",
+                        skewing_angle=skew_angle,
                         random_skew=True,
                         margins=(3,3,3,3))
 
                     generator_iter = iter(tqdm.tqdm(generator,
-                                          total=num_images_per_conf))
+                                          total=samples))
 
                     _run_generator(generator_iter, output_dir, lexicon_fh)
                     lexicon_fh.flush()
 
-    sys.exit()
+    sys.exit(0)
 
 
-def _run_generator(generator, output_dir, lexicon_fh):
+def _run_generator(generator: GeneratorFromStrings,
+                   output_dir: Union[str, pathlib.Path],
+                   lexicon_fh: TextIO):
     try:
         while True:
             try:
                 img, lbl = next(generator)
+
+                # Separate in subdirectories to avoid cluttering
+                # the root directory
+                try:
+                    img_out_dir = output_dir / lbl[0]
+                    img_out_dir.mkdir(parents=True, exist_ok=True)
+                    subdir = lbl[0]
+                except OSError:
+                    img_out_dir = output_dir / "#"
+                    img_out_dir.mkdir(parents=True, exist_ok=True)
+                    subdir = "#"
+
                 with tempfile.NamedTemporaryFile(
                         mode="w+b", prefix="", suffix=".jpg",
-                        dir=output_dir, delete=False) as tmpf:
+                        dir=img_out_dir, delete=False) as tmpf:
                     img.save(tmpf)
-                print(f"{os.path.basename(tmpf.name)}\t{lbl}", file=lexicon_fh)
+                print(f"{subdir}/{os.path.basename(tmpf.name)}\t{lbl}",
+                      file=lexicon_fh)
+
             except OSError:
                 pass
     except StopIteration:
         pass
 
 
+# Load utilities
+################################################################################
+
 def _load_dictionary(path):
-    with open(path, "rt", encoding="utf-8") as ofh:
-        return [x for x in map(str.strip, ofh) if x]
+    print("Loding dictionary ...")
+    try:
+        with open(path, "rt", encoding="utf-8") as ofh:
+            words = [x for x in map(str.strip, ofh) if x]
+    except UnicodeDecodeError:
+        print("Error reading dictionary file, please make sure the file"
+              " encoding is utf-8")
+        sys.exit(1)
+
+    alphabet = set()
+    for word in words:
+        for char in word:
+            alphabet.add(char)
+    alphabet = sorted(alphabet)
+
+    print("Loaded", len(words), "words")
+    print("Alphabet size:", len(alphabet))
+    print("Alphabet:", alphabet)
+
+    return words, alphabet
+
+
+def _load_fonts(fonts_dir: Union[str, pathlib.Path], alphabet: str):
+    fonts_dir = pathlib.Path(fonts_dir)
+
+    print("Looking for fonts ...")
+    all_fonts = [str(x) for x in fonts_dir.rglob("*.ttf")]
+    print("Found", len(all_fonts), "fonts")
+
+    fonts = [x for x in tqdm.tqdm(all_fonts, desc="Filtering fonts")
+             if _font_supports_alphabet(x, alphabet)]
+    print("# Fonts that support the alphabet:", len(fonts))
+
+    return fonts
 
 
 def _font_supports_alphabet(filepath, alphabet):
