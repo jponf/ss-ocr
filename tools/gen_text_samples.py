@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import collections
 import os.path
 import pathlib
 import random
@@ -9,6 +10,7 @@ from typing import Sequence, TextIO, Union
 
 import click
 import fontTools.ttLib
+import numpy as np
 import PIL.ImageFont
 import tqdm
 from trdg.generators import GeneratorFromStrings
@@ -17,6 +19,7 @@ from trdg.generators import GeneratorFromStrings
 ################################################################################
 
 DISTORSION_ORIENTATION = 2
+
 
 ################################################################################
 
@@ -73,6 +76,10 @@ def main(dict_file, fonts_dir, output_dir,
 
     print("Using seed:", seed)
     random.seed(seed)
+    np.random.seed(seed)
+
+    # Sample variables
+    weights = np.ones(len(words), dtype=np.float32)
 
     # Run generator
     lexicon_path = output_dir / "lexicon.txt"
@@ -80,9 +87,17 @@ def main(dict_file, fonts_dir, output_dir,
         for background in backgrounds:
             for dist_t in distortions:
                 for size in sizes:
-                    random.shuffle(words)
+                    selected = np.random.choice(words,
+                                                size=samples,
+                                                replace=False,
+                                                p=weights / weights.sum())
+                    selected_set = set(selected)
+                    for i, word in enumerate(words):
+                        if word not in selected_set:
+                            weights[i] += 1.0
+
                     generator = GeneratorFromStrings(
-                        words,
+                        selected,
                         count=samples,
                         fonts=fonts,
                         # language="en",
@@ -115,7 +130,7 @@ def _run_generator(generator: GeneratorFromStrings,
                 # Separate in subdirectories to avoid cluttering
                 # the root directory
                 try:
-                    img_out_dir = output_dir / lbl[0]
+                    img_out_dir = output_dir / lbl[0].lower()
                     img_out_dir.mkdir(parents=True, exist_ok=True)
                     subdir = lbl[0]
                 except OSError:
@@ -139,7 +154,27 @@ def _run_generator(generator: GeneratorFromStrings,
 # Load utilities
 ################################################################################
 
-def _load_dictionary(path):
+def _group_words(group_opt: str, words: Sequence[str]):
+    group_opt = group_opt.lower()
+    if group_opt == "none":
+        return [words]
+    elif group_opt == "first":
+        slice_size = 1
+    elif group_opt == "bigram":
+        slice_size = 2
+    elif group_opt == "trigram":
+        slice_size = 3
+    else:
+        raise ValueError(f"unknown group option {group_opt}")
+
+    groups = collections.defaultdict(list)
+    for word in tqdm.tqdm(words, desc=f"Grouping [{group_opt}]"):
+        groups[word[:slice_size].lower()].append(word)
+
+    return list(groups.values())
+
+
+def _load_dictionary(path: Union[str, pathlib.Path]):
     print("Loding dictionary ...")
     try:
         with open(path, "rt", encoding="utf-8") as ofh:
